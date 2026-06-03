@@ -1,4 +1,10 @@
 ## StyleGAN2-ADA &mdash; Official PyTorch implementation
+### Update Version
+> [!NOTE]
+> 支持在``config``中配置yaml文件，并通过和下面类似的方式开始训练
+> ```
+> python train.py --config config/celeba_128.yaml 
+> ```
 
 ![Teaser image](./docs/stylegan2-ada-teaser-1024x252.png)
 
