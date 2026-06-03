@@ -12,7 +12,23 @@ _STATE_DICT_FORMAT_VERSION = 1
 
 
 def _module_class_name(module: torch.nn.Module) -> str:
-    return f"{type(module).__module__}.{type(module).__name__}"
+    module_type = type(module)
+    if module_type.__module__ == "torch_utils.persistence" and len(module_type.__mro__) > 1:
+        orig_type = module_type.__mro__[1]
+        return f"{orig_type.__module__}.{orig_type.__name__}"
+    return f"{module_type.__module__}.{module_type.__name__}"
+
+
+def _normalize_class_name(class_name: str) -> str:
+    if class_name.startswith("torch_utils.persistence."):
+        short_name = class_name.rsplit(".", 1)[-1]
+        mapping = {
+            "Generator": "training.networks.Generator",
+            "Discriminator": "training.networks.Discriminator",
+            "AugmentPipe": "training.augment.AugmentPipe",
+        }
+        return mapping.get(short_name, class_name)
+    return class_name
 
 
 def _serialize_module(module: torch.nn.Module | None) -> dict[str, Any] | None:
@@ -29,22 +45,23 @@ def _deserialize_module(spec: dict[str, Any] | None, force_fp16: bool = False) -
     if spec is None:
         return None
 
-    module = dnnlib.util.construct_class_by_name(class_name=spec["class_name"], **spec["init_kwargs"]).eval().requires_grad_(False)
+    class_name = _normalize_class_name(spec["class_name"])
+    module = dnnlib.util.construct_class_by_name(class_name=class_name, **spec["init_kwargs"]).eval().requires_grad_(False)
     module.load_state_dict(spec["state_dict"])
 
     if force_fp16:
         kwargs = copy.deepcopy(module.init_kwargs)
-        if spec["class_name"].endswith(".Generator"):
+        if class_name.endswith(".Generator"):
             kwargs = dnnlib.EasyDict(kwargs)
             kwargs.synthesis_kwargs = dnnlib.EasyDict(kwargs.get("synthesis_kwargs", {}))
             kwargs.synthesis_kwargs.num_fp16_res = 4
             kwargs.synthesis_kwargs.conv_clamp = 256
-        if spec["class_name"].endswith(".Discriminator"):
+        if class_name.endswith(".Discriminator"):
             kwargs = dnnlib.EasyDict(kwargs)
             kwargs.num_fp16_res = 4
             kwargs.conv_clamp = 256
         if kwargs != module.init_kwargs:
-            fp16_module = dnnlib.util.construct_class_by_name(class_name=spec["class_name"], **kwargs).eval().requires_grad_(False)
+            fp16_module = dnnlib.util.construct_class_by_name(class_name=class_name, **kwargs).eval().requires_grad_(False)
             misc.copy_params_and_buffers(module, fp16_module, require_all=True)
             module = fp16_module
 
