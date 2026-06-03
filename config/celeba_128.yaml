@@ -14,15 +14,15 @@ gamma: null # R1 regularization 系数
 kimg: 5000 # 总训练长度 k张
 batch: 256 # 全局batch size，必须要被gpus整除
 
-aug: ada # 判别器增强策略 noaug ada fixed
+aug: noaug # 判别器增强策略 noaug ada fixed, ada相当于增强的概率是动态的，fixed则固定增强概率
 p: null # 只在fixed下有意义
-target: null # ada目标值，只在ada下有意义
-augpipe: color # 只在ada上有意义 blit geom color filter noise cutout  bg bgc bgcf bgcfn bgcfnc
+target: null # ada目标值，只在ada下有意义，null则默认0.6
+augpipe: color # 具体增强类型，只在ada/fixed上有意义 blit geom color filter noise cutout 组合：bg bgc bgcf bgcfn bgcfnc；目前涉及形状变换的(b,g,c)貌似都报错：derivative for aten::grid_sampler_2d_backward is not implemented
 
 resume: null # 从预训练继续/本地ckpt，比如 training-runs/00001-celeba128-mirror-auto2-kimg5000-batch256-noaug-noresume/network-snapshot-000123.pt
 freezed: null # 冻结判别器前面多少层
 
-fp32: false
+fp32: false # 全32精度训练
 nhwc: false # 是否在 FP16 下使用 channels-last 内存格式
 nobench: false # 是否关闭 cuDNN benchmark
 allow_tf32: true # 是否允许 PyTorch 在 matmul/conv 内部使用 TF32
