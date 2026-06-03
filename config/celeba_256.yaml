@@ -1,0 +1,29 @@
+outdir: ./training-runs
+data: ./data/celeba_128.zip
+gpus: 2
+snap: 10 # 每多少个tick保存一次图和checkpoint，一个tick默认是2000张照片
+metrics: [fid5k]
+seed: 0
+
+cfg: auto # 超参数模板
+mirror: true # 训练集水平翻转增强
+cond: false # 条件生成模型，数据里必须有标签
+subset: null # 一个正整数
+
+gamma: null # R1 regularization 系数
+kimg: 2000 # 总训练长度 k张
+batch: 128 # 全局batch size，必须要被gpus整除
+
+aug: noaug # 判别器增强策略 noaug ada fixed
+p: null # 只在fixed下有意义
+target: null # ada目标值，只在ada下有意义
+augpipe: bgc # 只在ada上有意义 blit geom color filter noise cutout  bg bgc bgcf bgcfn bgcfnc
+
+resume: noresume # 从预训练继续/本地ckpt
+freezed: null # 冻结判别器前面多少层
+
+fp32: false
+nhwc: false # 是否在 FP16 下使用 channels-last 内存格式
+nobench: false # 是否关闭 cuDNN benchmark
+allow_tf32: true # 是否允许 PyTorch 在 matmul/conv 内部使用 TF32
+workers: 4

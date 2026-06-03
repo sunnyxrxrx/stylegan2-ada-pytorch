@@ -55,6 +55,7 @@ def modulated_conv2d(
         w = weight.unsqueeze(0) # [NOIkk]
         w = w * styles.reshape(batch_size, 1, -1, 1, 1) # [NOIkk]
     if demodulate:
+        # 对每个样本、每个输出通道，计算一个归一化系数。平方和后根号取倒数
         dcoefs = (w.square().sum(dim=[2,3,4]) + 1e-8).rsqrt() # [NO]
     if demodulate and fused_modconv:
         w = w * dcoefs.reshape(batch_size, -1, 1, 1, 1) # [NOIkk]
@@ -64,6 +65,7 @@ def modulated_conv2d(
         x = x * styles.to(x.dtype).reshape(batch_size, -1, 1, 1)
         x = conv2d_resample.conv2d_resample(x=x, w=weight.to(x.dtype), f=resample_filter, up=up, down=down, padding=padding, flip_weight=flip_weight)
         if demodulate and noise is not None:
+            # 相当于x * dcoefs + noise
             x = fma.fma(x, dcoefs.to(x.dtype).reshape(batch_size, -1, 1, 1), noise.to(x.dtype))
         elif demodulate:
             x = x * dcoefs.to(x.dtype).reshape(batch_size, -1, 1, 1)
@@ -231,18 +233,20 @@ class MappingNetwork(torch.nn.Module):
         # Update moving average of W.
         if self.w_avg_beta is not None and self.training and not skip_w_avg_update:
             with torch.autograd.profiler.record_function('update_w_avg'):
+                # 线性插值，相当于移动平均 (1 - beta) * 当前batch均值 + beta * 旧均值
                 self.w_avg.copy_(x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
 
         # Broadcast.
         if self.num_ws is not None:
             with torch.autograd.profiler.record_function('broadcast'):
-                x = x.unsqueeze(1).repeat([1, self.num_ws, 1])
+                x = x.unsqueeze(1).repeat([1, self.num_ws, 1]) # [N, num_ws, w_dim]
 
         # Apply truncation.
         if truncation_psi != 1:
             with torch.autograd.profiler.record_function('truncate'):
                 assert self.w_avg_beta is not None
                 if self.num_ws is None or truncation_cutoff is None:
+                    # 线性插值，相当于 (1 - truncation_psi) * w_avg + truncation_psi * x
                     x = self.w_avg.lerp(x, truncation_psi)
                 else:
                     x[:, :truncation_cutoff] = self.w_avg.lerp(x[:, :truncation_cutoff], truncation_psi)

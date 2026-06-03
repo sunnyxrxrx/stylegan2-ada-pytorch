@@ -16,7 +16,9 @@ import json
 import tempfile
 import torch
 import dnnlib
+from click.core import ParameterSource
 
+from config_utils import load_yaml_config, merge_config_with_cli
 from training import training_loop
 from metrics import metric_main
 from torch_utils import training_stats
@@ -399,7 +401,8 @@ class CommaSeparatedList(click.ParamType):
 @click.pass_context
 
 # General options.
-@click.option('--outdir', help='Where to save the results', required=True, metavar='DIR')
+@click.option('--config', 'config_path', help='Path to YAML config file', type=click.Path(dir_okay=False, exists=True, path_type=str))
+@click.option('--outdir', help='Where to save the results', required=False, metavar='DIR')
 @click.option('--gpus', help='Number of GPUs to use [default: 1]', type=int, metavar='INT')
 @click.option('--snap', help='Snapshot interval [default: 50 ticks]', type=int, metavar='INT')
 @click.option('--metrics', help='Comma-separated list or "none" [default: fid50k_full]', type=CommaSeparatedList())
@@ -407,7 +410,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('-n', '--dry-run', help='Print training options and exit', is_flag=True)
 
 # Dataset.
-@click.option('--data', help='Training data (directory or zip)', metavar='PATH', required=True)
+@click.option('--data', help='Training data (directory or zip)', metavar='PATH', required=False)
 @click.option('--cond', help='Train conditional model based on dataset labels [default: false]', type=bool, metavar='BOOL')
 @click.option('--subset', help='Train with only N images [default: all]', type=int, metavar='INT')
 @click.option('--mirror', help='Enable dataset x-flips [default: false]', type=bool, metavar='BOOL')
@@ -425,7 +428,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--augpipe', help='Augmentation pipeline [default: bgc]', type=click.Choice(['blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc', 'bgcf', 'bgcfn', 'bgcfnc']))
 
 # Transfer learning.
-@click.option('--resume', help='Resume training [default: noresume]', metavar='PKL')
+@click.option('--resume', help='Resume training [default: noresume]', metavar='PATH')
 @click.option('--freezed', help='Freeze-D [default: 0 layers]', type=int, metavar='INT')
 
 # Performance options.
@@ -435,7 +438,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--allow-tf32', help='Allow PyTorch to use TF32 internally', type=bool, metavar='BOOL')
 @click.option('--workers', help='Override number of DataLoader workers', type=int, metavar='INT')
 
-def main(ctx, outdir, dry_run, **config_kwargs):
+def main(ctx, config_path, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper
     "Training Generative Adversarial Networks with Limited Data".
 
@@ -481,6 +484,29 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     """
     dnnlib.util.Logger(should_flush=True)
 
+    config_values = load_yaml_config(config_path) if config_path is not None else {}
+    if 'metrics' in config_values and isinstance(config_values['metrics'], str):
+        config_values['metrics'] = CommaSeparatedList().convert(config_values['metrics'], None, None)
+
+    cli_values = dict(config_kwargs)
+    cli_values['outdir'] = outdir
+    override_keys = {
+        name for name in cli_values
+        if ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+    }
+    merged_values = merge_config_with_cli(
+        config_values=config_values,
+        cli_values=cli_values,
+        cli_override_keys=override_keys,
+    )
+
+    outdir = merged_values.pop('outdir', None)
+    config_kwargs = merged_values
+    if outdir is None:
+        ctx.fail('Missing required option: provide --outdir or set `outdir` in --config')
+    if config_kwargs.get('data') is None:
+        ctx.fail('Missing required option: provide --data or set `data` in --config')
+
     # Setup training options.
     try:
         run_desc, args = setup_training_loop_kwargs(**config_kwargs)
@@ -499,6 +525,8 @@ def main(ctx, outdir, dry_run, **config_kwargs):
 
     # Print options.
     print()
+    if config_path is not None:
+        print(f'Config file:         {config_path}')
     print('Training options:')
     print(json.dumps(args, indent=2))
     print()

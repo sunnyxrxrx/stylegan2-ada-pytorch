@@ -130,6 +130,24 @@ def pr50k3(opts):
     return dict(pr50k3_precision=precision, pr50k3_recall=recall)
 
 @register_metric
+def fid5k(opts):
+    opts.dataset_kwargs.update(max_size=None)
+    fid = frechet_inception_distance.compute_fid(opts, max_real=5000, num_gen=5000)
+    return dict(fid5k=fid)
+
+@register_metric
+def kid5k(opts):
+    opts.dataset_kwargs.update(max_size=None)
+    kid = kernel_inception_distance.compute_kid(opts, max_real=5000, num_gen=5000, num_subsets=100, max_subset_size=1000)
+    return dict(kid5k=kid)
+
+@register_metric
+def pr5k3(opts):
+    opts.dataset_kwargs.update(max_size=None)
+    precision, recall = precision_recall.compute_pr(opts, max_real=5000, num_gen=5000, nhood_size=3, row_batch_size=10000, col_batch_size=10000)
+    return dict(pr5k3_precision=precision, pr5k3_recall=recall)
+
+@register_metric
 def ppl_zfull(opts):
     ppl = perceptual_path_length.compute_ppl(opts, num_samples=50000, epsilon=1e-4, space='z', sampling='full', crop=True, batch_size=2)
     return dict(ppl_zfull=ppl)
