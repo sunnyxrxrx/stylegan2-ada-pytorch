@@ -18,7 +18,7 @@ import numpy as np
 import PIL.Image
 import torch
 
-import legacy
+from torch_utils.checkpoint import load_network_checkpoint
 
 #----------------------------------------------------------------------------
 
@@ -61,8 +61,7 @@ def generate_style_mix(
     """
     print('Loading networks from "%s"...' % network_pkl)
     device = torch.device('cuda')
-    with dnnlib.util.open_url(network_pkl) as f:
-        G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+    G = load_network_checkpoint(network_pkl)['G_ema'].to(device) # type: ignore
 
     os.makedirs(outdir, exist_ok=True)
 

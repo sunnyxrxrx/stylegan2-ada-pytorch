@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 
 import dnnlib
-import legacy
+from torch_utils.checkpoint import load_network_checkpoint
 
 def project(
     G,
@@ -161,8 +161,7 @@ def run_projection(
     # Load networks.
     print('Loading networks from "%s"...' % network_pkl)
     device = torch.device('cuda')
-    with dnnlib.util.open_url(network_pkl) as fp:
-        G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device) # type: ignore
+    G = load_network_checkpoint(network_pkl)['G_ema'].requires_grad_(False).to(device) # type: ignore
 
     # Load target image.
     target_pil = PIL.Image.open(target_fname).convert('RGB')

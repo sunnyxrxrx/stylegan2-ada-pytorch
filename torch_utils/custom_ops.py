@@ -21,6 +21,7 @@ from torch.utils.file_baton import FileBaton
 # Global options.
 
 verbosity = 'brief' # Verbosity level: 'none', 'brief', 'full'
+legacy_enabled = os.environ.get('STYLEGAN2_ENABLE_LEGACY_CUSTOM_OPS', '0') == '1'
 
 #----------------------------------------------------------------------------
 # Internal helper funcs.
@@ -45,6 +46,12 @@ _cached_plugins = dict()
 
 def get_plugin(module_name, sources, **build_kwargs):
     assert verbosity in ['none', 'brief', 'full']
+
+    if not legacy_enabled:
+        raise RuntimeError(
+            'Legacy custom ops are disabled by default. '
+            'Set STYLEGAN2_ENABLE_LEGACY_CUSTOM_OPS=1 to enable runtime C++/CUDA plugin builds.'
+        )
 
     # Already cached?
     if module_name in _cached_plugins:

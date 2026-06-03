@@ -9,9 +9,9 @@
 """2D convolution with optional up/downsampling."""
 
 import torch
+import torch.nn.functional as F
 
 from .. import misc
-from . import conv2d_gradfix
 from . import upfirdn2d
 from .upfirdn2d import _parse_padding
 from .upfirdn2d import _get_filter_size
@@ -46,11 +46,11 @@ def _conv2d_wrapper(x, w, stride=1, padding=0, groups=1, transpose=False, flip_w
             else:
                 x = x.to(memory_format=torch.contiguous_format)
                 w = w.to(memory_format=torch.contiguous_format)
-                x = conv2d_gradfix.conv2d(x, w, groups=groups)
+                x = F.conv2d(x, w, groups=groups)
             return x.to(memory_format=torch.channels_last)
 
-    # Otherwise => execute using conv2d_gradfix.
-    op = conv2d_gradfix.conv_transpose2d if transpose else conv2d_gradfix.conv2d
+    # Otherwise => execute using PyTorch native convolution.
+    op = F.conv_transpose2d if transpose else F.conv2d
     return op(x, w, stride=stride, padding=padding, groups=groups)
 
 #----------------------------------------------------------------------------

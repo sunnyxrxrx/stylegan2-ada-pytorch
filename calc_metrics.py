@@ -16,9 +16,9 @@ import copy
 import torch
 import dnnlib
 
-import legacy
 from metrics import metric_main
 from metrics import metric_utils
+from torch_utils.checkpoint import load_network_checkpoint
 from torch_utils import training_stats
 from torch_utils import custom_ops
 from torch_utils import misc
@@ -86,7 +86,7 @@ class CommaSeparatedList(click.ParamType):
 
 @click.command()
 @click.pass_context
-@click.option('network_pkl', '--network', help='Network pickle filename or URL', metavar='PATH', required=True)
+@click.option('network_pkl', '--network', help='Network checkpoint filename or URL', metavar='PATH', required=True)
 @click.option('--metrics', help='Comma-separated list or "none"', type=CommaSeparatedList(), default='fid50k_full', show_default=True)
 @click.option('--data', help='Dataset to evaluate metrics against (directory or zip) [default: same as training data]', metavar='PATH')
 @click.option('--mirror', help='Whether the dataset was augmented with x-flips during training [default: look up]', type=bool, metavar='BOOL')
@@ -94,7 +94,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--verbose', help='Print optional information', type=bool, default=True, metavar='BOOL', show_default=True)
 
 def calc_metrics(ctx, network_pkl, metrics, data, mirror, gpus, verbose):
-    """Calculate quality metrics for previous training run or pretrained network pickle.
+    """Calculate quality metrics for previous training run or pretrained network checkpoint.
 
     Examples:
 
@@ -104,7 +104,7 @@ def calc_metrics(ctx, network_pkl, metrics, data, mirror, gpus, verbose):
         --network=~/training-runs/00000-ffhq10k-res64-auto1/network-snapshot-000000.pkl
 
     \b
-    # Pre-trained network pickle: specify dataset explicitly, print result to stdout.
+    # Pre-trained network checkpoint: specify dataset explicitly, print result to stdout.
     python calc_metrics.py --metrics=fid50k_full --data=~/datasets/ffhq.zip --mirror=1 \\
         --network=https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/ffhq.pkl
 
@@ -142,9 +142,8 @@ def calc_metrics(ctx, network_pkl, metrics, data, mirror, gpus, verbose):
         ctx.fail('--network must point to a file or URL')
     if args.verbose:
         print(f'Loading network from "{network_pkl}"...')
-    with dnnlib.util.open_url(network_pkl, verbose=args.verbose) as f:
-        network_dict = legacy.load_network_pkl(f)
-        args.G = network_dict['G_ema'] # subclass of torch.nn.Module
+    network_dict = load_network_checkpoint(network_pkl)
+    args.G = network_dict['G_ema'] # subclass of torch.nn.Module
 
     # Initialize dataset options.
     if data is not None:
