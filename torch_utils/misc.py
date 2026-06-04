@@ -119,25 +119,55 @@ class InfiniteSampler(torch.utils.data.Sampler):
         self.shuffle = shuffle
         self.seed = seed
         self.window_size = window_size
+        self._order = None
+        self._rnd = None
+        self._window = 0
+        self._idx = 0
+
+    def _ensure_state(self):
+        if self._order is not None:
+            return
+        self._order = np.arange(len(self.dataset))
+        self._rnd = None
+        self._window = 0
+        if self.shuffle:
+            self._rnd = np.random.RandomState(self.seed)
+            self._rnd.shuffle(self._order)
+            self._window = int(np.rint(self._order.size * self.window_size))
+
+    def state_dict(self):
+        self._ensure_state()
+        return dict(
+            order=self._order.copy(),
+            rnd_state=None if self._rnd is None else self._rnd.get_state(),
+            window=self._window,
+            idx=self._idx,
+        )
+
+    def load_state_dict(self, state):
+        self._order = np.asarray(state['order']).copy()
+        self._window = int(state['window'])
+        self._idx = int(state['idx'])
+        rnd_state = state.get('rnd_state')
+        if rnd_state is None:
+            self._rnd = None
+        else:
+            self._rnd = np.random.RandomState()
+            self._rnd.set_state(rnd_state)
 
     def __iter__(self):
-        order = np.arange(len(self.dataset))
-        rnd = None
-        window = 0
-        if self.shuffle:
-            rnd = np.random.RandomState(self.seed)
-            rnd.shuffle(order)
-            window = int(np.rint(order.size * self.window_size))
-
-        idx = 0
+        self._ensure_state()
         while True:
-            i = idx % order.size
-            if idx % self.num_replicas == self.rank:
-                yield order[i]
-            if window >= 2:
-                j = (i - rnd.randint(window)) % order.size
-                order[i], order[j] = order[j], order[i]
-            idx += 1
+            i = self._idx % self._order.size
+            sample = None
+            if self._idx % self.num_replicas == self.rank:
+                sample = int(self._order[i])
+            if self._window >= 2:
+                j = (i - self._rnd.randint(self._window)) % self._order.size
+                self._order[i], self._order[j] = self._order[j], self._order[i]
+            self._idx += 1
+            if sample is not None:
+                yield sample
 
 #----------------------------------------------------------------------------
 # Utilities for operating with torch.nn.Module parameters and buffers.

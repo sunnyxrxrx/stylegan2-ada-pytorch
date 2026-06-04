@@ -10,14 +10,16 @@ import os
 import time
 import copy
 import json
+import random
 import psutil
 import PIL.Image
 import numpy as np
 import torch
+import torch.distributed as dist
 import dnnlib
 from torch_utils import misc
 from torch_utils import training_stats
-from torch_utils.checkpoint import load_network_checkpoint, save_network_checkpoint
+from torch_utils.checkpoint import load_network_checkpoint, load_training_checkpoint, save_training_checkpoint
 from metrics import metric_main
 
 
@@ -84,6 +86,48 @@ def save_image_grid(img, fname, drange, grid_size):
 
 #----------------------------------------------------------------------------
 
+def _optimizer_state_to_device(optimizer, device):
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
+
+def _capture_rng_state(device):
+    return dict(
+        python=random.getstate(),
+        numpy=np.random.get_state(),
+        torch=torch.random.get_rng_state().cpu(),
+        cuda=torch.cuda.get_rng_state(device).cpu(),
+    )
+
+
+def _restore_rng_state(state, device):
+    if not state:
+        return
+    random.setstate(state['python'])
+    np.random.set_state(state['numpy'])
+    torch.random.set_rng_state(state['torch'].cpu())
+    torch.cuda.set_rng_state(state['cuda'].cpu(), device)
+
+
+def _gather_rank_objects(obj, num_gpus):
+    if num_gpus <= 1 or not dist.is_available() or not dist.is_initialized():
+        return [obj]
+    gathered = [None for _ in range(num_gpus)]
+    dist.all_gather_object(gathered, obj)
+    return gathered
+
+
+def _build_snapshot_grid_payload(grid_size, grid_z, grid_c):
+    return dict(
+        grid_size=list(grid_size),
+        grid_z=torch.cat(list(grid_z)).cpu(),
+        grid_c=torch.cat(list(grid_c)).cpu(),
+    )
+
+#----------------------------------------------------------------------------
+
 def training_loop(
     run_dir                 = '.',      # Output directory.
     training_set_kwargs     = {},       # Options for training set.
@@ -113,6 +157,7 @@ def training_loop(
     image_snapshot_ticks    = 50,       # How often to save image snapshots? None = disable.
     network_snapshot_ticks  = 50,       # How often to save network snapshots? None = disable.
     resume_pkl              = None,     # Network checkpoint (.pt or legacy .pkl) to resume training from.
+    resume_full_state       = False,    # Whether to treat resume_pkl as a run directory/latest checkpoint and resume full state.
     cudnn_benchmark         = True,     # Enable torch.backends.cudnn.benchmark?
     allow_tf32              = False,    # Enable torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
@@ -126,12 +171,29 @@ def training_loop(
     torch.backends.cudnn.benchmark = cudnn_benchmark    # Improves training speed.
     torch.backends.cuda.matmul.allow_tf32 = allow_tf32  # Allow PyTorch to internally use tf32 for matmul
     torch.backends.cudnn.allow_tf32 = allow_tf32        # Allow PyTorch to internally use tf32 for convolutions
+    resume_data = None
+    if resume_pkl is not None:
+        if rank == 0:
+            print(f'Resuming from "{resume_pkl}"')
+        if resume_full_state:
+            resume_data = load_training_checkpoint(resume_pkl)
+            resume_full_state = bool(resume_data.get('is_full_state', False))
+        else:
+            resume_data = load_network_checkpoint(resume_pkl)
+        if resume_full_state and resume_data is not None:
+            if resume_data.get('training_set_kwargs') is not None:
+                training_set_kwargs = dict(resume_data['training_set_kwargs'])
+            start_time = time.time() - float(resume_data.get('progress', {}).get('total_elapsed_sec', 0.0))
 
     # Load training set.
     if rank == 0:
         print('Loading training set...')
     training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs) # subclass of training.dataset.Dataset
     training_set_sampler = misc.InfiniteSampler(dataset=training_set, rank=rank, num_replicas=num_gpus, seed=random_seed)
+    if resume_full_state:
+        sampler_states = resume_data.get('sampler_states', [])
+        if len(sampler_states) > rank:
+            training_set_sampler.load_state_dict(sampler_states[rank])
     training_set_iterator = iter(torch.utils.data.DataLoader(dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs))
     if rank == 0:
         print()
@@ -149,9 +211,9 @@ def training_loop(
     G_ema = copy.deepcopy(G).eval()
 
     # Resume from existing checkpoint.
-    if (resume_pkl is not None) and (rank == 0):
-        print(f'Resuming from "{resume_pkl}"')
-        resume_data = load_network_checkpoint(resume_pkl)
+    if resume_data is not None:
+        if rank == 0 and not resume_full_state:
+            print('Resume source does not include optimizer/progress state; falling back to weight-only resume.')
         for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
 
@@ -172,6 +234,8 @@ def training_loop(
         augment_pipe.p.copy_(torch.as_tensor(augment_p))
         if ada_target is not None:
             ada_stats = training_stats.Collector(regex='Loss/signs/real')
+    if resume_data is not None and resume_data.get('augment_pipe') is not None and augment_pipe is not None:
+        misc.copy_params_and_buffers(resume_data['augment_pipe'], augment_pipe, require_all=False)
 
     # Distribute across GPUs.
     if rank == 0:
@@ -190,9 +254,11 @@ def training_loop(
         print('Setting up training phases...')
     loss = dnnlib.util.construct_class_by_name(device=device, **ddp_modules, **loss_kwargs) # subclass of training.loss.Loss
     phases = []
+    optimizers = dict()
     for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval), ('D', D, D_opt_kwargs, D_reg_interval)]:
         if reg_interval is None:
             opt = dnnlib.util.construct_class_by_name(params=module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
+            optimizers[name] = opt
             phases += [dnnlib.EasyDict(name=name+'both', module=module, opt=opt, interval=1)]
         else: # Lazy regularization.
             mb_ratio = reg_interval / (reg_interval + 1)
@@ -200,6 +266,7 @@ def training_loop(
             opt_kwargs.lr = opt_kwargs.lr * mb_ratio
             opt_kwargs.betas = [beta ** mb_ratio for beta in opt_kwargs.betas]
             opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
+            optimizers[name] = opt
             phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
             phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
     for phase in phases:
@@ -208,6 +275,15 @@ def training_loop(
         if rank == 0:
             phase.start_event = torch.cuda.Event(enable_timing=True)
             phase.end_event = torch.cuda.Event(enable_timing=True)
+    if resume_full_state:
+        optimizer_states = resume_data.get('optimizers', {})
+        for name, optimizer in optimizers.items():
+            if name in optimizer_states:
+                optimizer.load_state_dict(optimizer_states[name])
+                _optimizer_state_to_device(optimizer, device)
+        rng_states = resume_data.get('rng_states', [])
+        if len(rng_states) > rank:
+            _restore_rng_state(rng_states[rank], device)
 
     # Export sample images.
     grid_size = None
@@ -215,25 +291,36 @@ def training_loop(
     grid_c = None
     if rank == 0:
         print('Exporting sample images...')
-        grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
-        save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
-        grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
-        grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-        images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-        save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+        snapshot_grid = resume_data.get('snapshot_grid') if resume_full_state else None
+        if snapshot_grid is not None:
+            grid_size = tuple(snapshot_grid['grid_size'])
+            grid_z = snapshot_grid['grid_z'].to(device).split(batch_gpu)
+            grid_c = snapshot_grid['grid_c'].to(device).split(batch_gpu)
+        else:
+            grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
+            save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+            grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
+            grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
+            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
 
     # Initialize logs.
     if rank == 0:
         print('Initializing logs...')
     stats_collector = training_stats.Collector(regex='.*')
-    stats_metrics = dict()
+    stats_metrics = dict(resume_data.get('stats_metrics', {})) if resume_full_state else dict()
     stats_jsonl = None
     stats_tfevents = None
+    resume_progress = resume_data.get('progress', {}) if resume_full_state else {}
+    resume_kimg = int(resume_progress.get('cur_nimg', 0) / 1e3)
     if rank == 0:
-        stats_jsonl = open(os.path.join(run_dir, 'stats.jsonl'), 'wt')
+        stats_jsonl = open(os.path.join(run_dir, 'stats.jsonl'), 'at', encoding='utf-8')
         try:
             import torch.utils.tensorboard as tensorboard
-            stats_tfevents = tensorboard.SummaryWriter(run_dir)
+            writer_kwargs = dict(log_dir=run_dir)
+            if resume_full_state and resume_kimg > 0:
+                writer_kwargs['purge_step'] = resume_kimg
+            stats_tfevents = tensorboard.SummaryWriter(**writer_kwargs)
         except ImportError as err:
             print('Skipping tfevents export:', err)
 
@@ -241,14 +328,14 @@ def training_loop(
     if rank == 0:
         print(f'Training for {total_kimg} kimg...')
         print()
-    cur_nimg = 0
-    cur_tick = 0
-    tick_start_nimg = cur_nimg
+    cur_nimg = int(resume_progress.get('cur_nimg', 0))
+    cur_tick = int(resume_progress.get('cur_tick', 0))
+    tick_start_nimg = int(resume_progress.get('tick_start_nimg', cur_nimg))
     tick_start_time = time.time()
-    maintenance_time = tick_start_time - start_time
-    batch_idx = 0
+    maintenance_time = 0.0 if resume_full_state else tick_start_time - start_time
+    batch_idx = int(resume_progress.get('batch_idx', 0))
     if progress_fn is not None:
-        progress_fn(0, total_kimg)
+        progress_fn(cur_nimg // 1000, total_kimg)
     while True:
 
         # Fetch training data.
@@ -358,8 +445,34 @@ def training_loop(
                 snapshot_data[name] = module
                 del module # conserve memory
             snapshot_path = os.path.join(run_dir, f'network-snapshot-{cur_nimg//1000:06d}.pt')
+        if snapshot_data is not None:
+            runtime_state = dict(
+                sampler=training_set_sampler.state_dict(),
+                rng=_capture_rng_state(device),
+            )
+            gathered_runtime_states = _gather_rank_objects(runtime_state, num_gpus)
             if rank == 0:
-                save_network_checkpoint(snapshot_path, snapshot_data)
+                training_state = dict(
+                    training_set_kwargs=dict(training_set_kwargs),
+                    G=snapshot_data.get('G'),
+                    D=snapshot_data.get('D'),
+                    G_ema=snapshot_data.get('G_ema'),
+                    augment_pipe=snapshot_data.get('augment_pipe'),
+                    optimizers={name: optimizer.state_dict() for name, optimizer in optimizers.items()},
+                    progress=dict(
+                        cur_nimg=cur_nimg,
+                        cur_tick=cur_tick + 1,
+                        batch_idx=batch_idx,
+                        tick_start_nimg=cur_nimg,
+                        total_elapsed_sec=tick_end_time - start_time,
+                    ),
+                    sampler_states=[item['sampler'] for item in gathered_runtime_states],
+                    rng_states=[item['rng'] for item in gathered_runtime_states],
+                    snapshot_grid=_build_snapshot_grid_payload(grid_size, grid_z, grid_c),
+                    stats_metrics=dict(stats_metrics),
+                )
+                save_training_checkpoint(snapshot_path, training_state)
+                save_training_checkpoint(os.path.join(run_dir, 'latest.pt'), training_state)
 
         # Evaluate metrics.
         if (snapshot_data is not None) and (len(metrics) > 0):

@@ -502,7 +502,9 @@ def main(ctx, config_path, outdir, dry_run, **config_kwargs):
 
     outdir = merged_values.pop('outdir', None)
     config_kwargs = merged_values
-    if outdir is None:
+    resume_value = config_kwargs.get('resume')
+    resume_dir_requested = isinstance(resume_value, str) and os.path.isdir(resume_value)
+    if outdir is None and not resume_dir_requested:
         ctx.fail('Missing required option: provide --outdir or set `outdir` in --config')
     if config_kwargs.get('data') is None:
         ctx.fail('Missing required option: provide --data or set `data` in --config')
@@ -514,14 +516,25 @@ def main(ctx, config_path, outdir, dry_run, **config_kwargs):
         ctx.fail(err)
 
     # Pick output directory.
-    prev_run_dirs = []
-    if os.path.isdir(outdir):
-        prev_run_dirs = [x for x in os.listdir(outdir) if os.path.isdir(os.path.join(outdir, x))]
-    prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
-    prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
-    cur_run_id = max(prev_run_ids, default=-1) + 1
-    args.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{run_desc}')
-    assert not os.path.exists(args.run_dir)
+    args.resume_full_state = False
+    resume_target = getattr(args, 'resume_pkl', None)
+    resume_in_place = isinstance(resume_target, str) and os.path.isdir(resume_target)
+    if resume_in_place:
+        args.run_dir = os.path.abspath(resume_target)
+        args.resume_full_state = True
+        latest_path = os.path.join(args.run_dir, 'latest.pt')
+        if not os.path.isfile(latest_path):
+            ctx.fail(f'Resume directory does not contain `latest.pt`: {args.run_dir}')
+        args.resume_pkl = latest_path
+    else:
+        prev_run_dirs = []
+        if os.path.isdir(outdir):
+            prev_run_dirs = [x for x in os.listdir(outdir) if os.path.isdir(os.path.join(outdir, x))]
+        prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
+        prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
+        cur_run_id = max(prev_run_ids, default=-1) + 1
+        args.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{run_desc}')
+        assert not os.path.exists(args.run_dir)
 
     # Print options.
     print()
@@ -531,6 +544,8 @@ def main(ctx, config_path, outdir, dry_run, **config_kwargs):
     print(json.dumps(args, indent=2))
     print()
     print(f'Output directory:   {args.run_dir}')
+    if resume_in_place:
+        print('Resume mode:        continue from directory latest.pt')
     print(f'Training data:      {args.training_set_kwargs.path}')
     print(f'Training duration:  {args.total_kimg} kimg')
     print(f'Number of GPUs:     {args.num_gpus}')
@@ -547,8 +562,9 @@ def main(ctx, config_path, outdir, dry_run, **config_kwargs):
 
     # Create output directory.
     print('Creating output directory...')
-    os.makedirs(args.run_dir)
-    with open(os.path.join(args.run_dir, 'training_options.json'), 'wt') as f:
+    os.makedirs(args.run_dir, exist_ok=True)
+    options_path = os.path.join(args.run_dir, 'training_options.resume.json' if resume_in_place else 'training_options.json')
+    with open(options_path, 'wt') as f:
         json.dump(args, f, indent=2)
 
     # Launch processes.
