@@ -22,6 +22,8 @@ from torch_utils import training_stats
 from torch_utils.checkpoint import load_network_checkpoint, load_training_checkpoint, save_training_checkpoint
 from metrics import metric_main
 
+from torch_utils.ops import grid_sample_gradfix
+
 
 
 
@@ -171,6 +173,8 @@ def training_loop(
     torch.backends.cudnn.benchmark = cudnn_benchmark    # Improves training speed.
     torch.backends.cuda.matmul.allow_tf32 = allow_tf32  # Allow PyTorch to internally use tf32 for matmul
     torch.backends.cudnn.allow_tf32 = allow_tf32        # Allow PyTorch to internally use tf32 for convolutions
+    grid_sample_gradfix.enabled = True    
+    
     resume_data = None
     if resume_pkl is not None:
         if rank == 0:
