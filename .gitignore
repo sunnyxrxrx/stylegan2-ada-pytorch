@@ -3,3 +3,4 @@ __pycache__/
 *.pkl
 *.pt
 training-runs*/
+stylegan_output*/

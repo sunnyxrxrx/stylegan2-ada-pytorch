@@ -1,5 +1,7 @@
 import copy
+import io
 import os
+import pickle
 from typing import Any
 
 import torch
@@ -159,7 +161,17 @@ def load_network_checkpoint(path_or_url: str, force_fp16: bool = False) -> dict[
     with dnnlib.util.open_url(path_or_url) as f:
         if str(path_or_url).lower().endswith(".pkl"):
             return legacy.load_network_pkl(f, force_fp16=force_fp16)
-        data = torch.load(f, map_location="cpu")
+        raw = f.read()
+
+    bio = io.BytesIO(raw)
+    try:
+        data = torch.load(bio, map_location="cpu", weights_only=False)
+    except TypeError:
+        bio.seek(0)
+        data = torch.load(bio, map_location="cpu")
+    except pickle.UnpicklingError:
+        bio.seek(0)
+        data = torch.load(bio, map_location="cpu", weights_only=False)
 
     if is_training_state_checkpoint(data):
         return _deserialize_network_payload(data, force_fp16=force_fp16)
@@ -175,7 +187,17 @@ def load_training_checkpoint(path_or_url: str, force_fp16: bool = False) -> dict
             data = legacy.load_network_pkl(f, force_fp16=force_fp16)
             data["is_full_state"] = False
             return data
-        data = torch.load(f, map_location="cpu")
+        raw = f.read()
+
+    bio = io.BytesIO(raw)
+    try:
+        data = torch.load(bio, map_location="cpu", weights_only=False)
+    except TypeError:
+        bio.seek(0)
+        data = torch.load(bio, map_location="cpu")
+    except pickle.UnpicklingError:
+        bio.seek(0)
+        data = torch.load(bio, map_location="cpu", weights_only=False)
 
     if is_training_state_checkpoint(data):
         result = _deserialize_network_payload(data, force_fp16=force_fp16)
