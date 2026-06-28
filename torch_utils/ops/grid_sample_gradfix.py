@@ -34,10 +34,12 @@ def grid_sample(input, grid):
 def _should_use_custom_op():
     if not enabled:
         return False
-    if any(torch.__version__.startswith(x) for x in ['1.7.', '1.8.', '1.9']):
+    else:
         return True
-    warnings.warn(f'grid_sample_gradfix not supported on PyTorch {torch.__version__}. Falling back to torch.nn.functional.grid_sample().')
-    return False
+    # if any(torch.__version__.startswith(x) for x in ['1.7.', '1.8.', '1.9']):
+    #     return True
+    # warnings.warn(f'grid_sample_gradfix not supported on PyTorch {torch.__version__}. Falling back to torch.nn.functional.grid_sample().')
+    # return False
 
 #----------------------------------------------------------------------------
 
@@ -62,7 +64,19 @@ class _GridSample2dBackward(torch.autograd.Function):
     @staticmethod
     def forward(ctx, grad_output, input, grid):
         op = torch._C._jit_get_operation('aten::grid_sampler_2d_backward')
-        grad_input, grad_grid = op(grad_output, input, grid, 0, 0, False)
+        # grad_input, grad_grid = op(grad_output, input, grid, 0, 0, False)
+        # 1. 兼容 PyTorch 1.11+ 返回 tuple 的情况
+        if isinstance(op, tuple):
+            op = op[0]
+            
+        # 2. 兼容 PyTorch 1.11+ 必须传入 output_mask 参数的情况
+        try:
+            # 尝试最新版本的带有 output_mask 的 C++ 签名
+            output_mask = (ctx.needs_input_grad[1], ctx.needs_input_grad[2])
+            grad_input, grad_grid = op(grad_output, input, grid, 0, 0, False, output_mask)
+        except TypeError:
+            # 如果报错，说明当前环境是旧版 PyTorch，回退到不带 output_mask 的经典签名
+            grad_input, grad_grid = op(grad_output, input, grid, 0, 0, False)
         ctx.save_for_backward(grid)
         return grad_input, grad_grid
 

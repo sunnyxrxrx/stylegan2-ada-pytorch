@@ -14,6 +14,7 @@ from torch_utils import persistence
 from torch_utils import misc
 from torch_utils.ops import upfirdn2d
 from torch_utils.ops import grid_sample_gradfix
+# from torch_utils.ops import cuda_gridsample
 
 #----------------------------------------------------------------------------
 # Coefficients of various wavelet decomposition low-pass filters.
@@ -296,6 +297,7 @@ class AugmentPipe(torch.nn.Module):
             G_inv = scale2d(2 / images.shape[3], 2 / images.shape[2], device=device) @ G_inv @ scale2d_inv(2 / shape[3], 2 / shape[2], device=device)
             grid = torch.nn.functional.affine_grid(theta=G_inv[:,:2,:], size=shape, align_corners=False)
             images = grid_sample_gradfix.grid_sample(images, grid)
+            # images = cuda_gridsample.grid_sample_2d(images, grid)
 
             # Downsample and crop.
             images = upfirdn2d.downsample2d(x=images, f=self.Hz_geom, down=2, padding=-Hz_pad*2, flip_filter=True)

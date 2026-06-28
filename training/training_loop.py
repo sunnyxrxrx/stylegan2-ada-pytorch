@@ -454,7 +454,7 @@ def training_loop(
                 sampler=training_set_sampler.state_dict(),
                 rng=_capture_rng_state(device),
             )
-            gathered_runtime_states = _gather_rank_objects(runtime_state, num_gpus)
+            # gathered_runtime_states = _gather_rank_objects(runtime_state, num_gpus)
             if rank == 0:
                 training_state = dict(
                     training_set_kwargs=dict(training_set_kwargs),
@@ -470,8 +470,8 @@ def training_loop(
                         tick_start_nimg=cur_nimg,
                         total_elapsed_sec=tick_end_time - start_time,
                     ),
-                    sampler_states=[item['sampler'] for item in gathered_runtime_states],
-                    rng_states=[item['rng'] for item in gathered_runtime_states],
+                    # sampler_states=[item['sampler'] for item in gathered_runtime_states],
+                    # rng_states=[item['rng'] for item in gathered_runtime_states],
                     snapshot_grid=_build_snapshot_grid_payload(grid_size, grid_z, grid_c),
                     stats_metrics=dict(stats_metrics),
                 )
